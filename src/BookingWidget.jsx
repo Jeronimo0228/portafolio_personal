@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 const SCRIPT_SRC = "https://widget.simplybook.me/v2/widget/widget.js";
 const CONTAINER_ID = "sbw_c78kvi";
@@ -30,61 +30,124 @@ const WIDGET_CONFIG = {
     allow_switch_to_ada: 0,
     predefined: [],
   },
-  container_id: CONTAINER_ID,
 };
 
-/**
- * Loads SimplyBook only from widget.simplybook.me (HTTPS).
- * Avoids re-injecting the script if it is already present.
- */
+/** Load SimplyBook once per page. Do not set crossOrigin — their CDN has no CORS ACAO. */
+function loadSimplybookScript() {
+  if (typeof window.SimplybookWidget === "function") {
+    return Promise.resolve();
+  }
+
+  const existing = document.querySelector(`script[data-simplybook-widget="1"]`);
+  if (existing) {
+    return new Promise((resolve, reject) => {
+      if (typeof window.SimplybookWidget === "function") {
+        resolve();
+        return;
+      }
+      existing.addEventListener("load", () => resolve(), { once: true });
+      existing.addEventListener("error", () => reject(new Error("SimplyBook script failed")), { once: true });
+    });
+  }
+
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = SCRIPT_SRC;
+    script.async = true;
+    script.dataset.simplybookWidget = "1";
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error("SimplyBook script failed"));
+    document.body.appendChild(script);
+  });
+}
+
+function buildFallbackSrc() {
+  const params = new URLSearchParams({
+    "widget-type": "iframe",
+    theme: "classic",
+    timeline: "modern",
+    datepicker: "top_calendar",
+    host_url: typeof window !== "undefined" ? window.location.href : "",
+  });
+  return `https://personaljeronimo.simplybook.me/v2/?${params.toString()}`;
+}
+
 export default function BookingWidget() {
-  const mountedRef = useRef(true);
+  const containerRef = useRef(null);
+  const [status, setStatus] = useState("loading");
+  const [fallbackSrc, setFallbackSrc] = useState("");
 
   useEffect(() => {
-    mountedRef.current = true;
-    let scriptEl = document.querySelector(`script[src="${SCRIPT_SRC}"]`);
-    let createdByUs = false;
+    let cancelled = false;
 
-    const initWidget = () => {
-      if (!mountedRef.current) return;
-      if (typeof window.SimplybookWidget !== "function") return;
-      const container = document.getElementById(CONTAINER_ID);
-      if (!container) return;
-      container.innerHTML = "";
-      // eslint-disable-next-line no-new
-      new window.SimplybookWidget(WIDGET_CONFIG);
+    const mount = async () => {
+      try {
+        await loadSimplybookScript();
+        if (cancelled || !containerRef.current) return;
+
+        // Allow remount after React StrictMode cleanup
+        if (window.SimplybookWidget) {
+          window.SimplybookWidget._instanceCreated = false;
+        }
+
+        containerRef.current.innerHTML = "";
+
+        // Pass the DOM node directly (supported by SimplyBook)
+        // eslint-disable-next-line no-new
+        new window.SimplybookWidget({
+          ...WIDGET_CONFIG,
+          container_id: containerRef.current,
+        });
+
+        // Ensure iframe is tall enough before size postMessage arrives
+        const iframe = containerRef.current.querySelector("iframe");
+        if (iframe) {
+          iframe.style.minHeight = "720px";
+          iframe.style.width = "100%";
+          iframe.style.border = "0";
+          iframe.setAttribute("scrolling", "no");
+        }
+
+        if (!cancelled) setStatus("ready");
+      } catch {
+        if (cancelled) return;
+        setFallbackSrc(buildFallbackSrc());
+        setStatus("fallback");
+      }
     };
 
-    if (scriptEl && typeof window.SimplybookWidget === "function") {
-      initWidget();
-    } else {
-      if (!scriptEl) {
-        scriptEl = document.createElement("script");
-        scriptEl.async = true;
-        scriptEl.src = SCRIPT_SRC;
-        scriptEl.crossOrigin = "anonymous";
-        createdByUs = true;
-        document.head.appendChild(scriptEl);
-      }
-      scriptEl.addEventListener("load", initWidget);
-    }
+    mount();
 
     return () => {
-      mountedRef.current = false;
-      scriptEl?.removeEventListener("load", initWidget);
-      if (createdByUs && scriptEl?.parentNode) {
-        scriptEl.parentNode.removeChild(scriptEl);
+      cancelled = true;
+      // Keep the shared script; only clear this container
+      if (containerRef.current) containerRef.current.innerHTML = "";
+      if (window.SimplybookWidget) {
+        window.SimplybookWidget._instanceCreated = false;
       }
-      const container = document.getElementById(CONTAINER_ID);
-      if (container) container.innerHTML = "";
     };
   }, []);
+
+  if (status === "fallback" && fallbackSrc) {
+    return (
+      <iframe
+        title="Reservas SimplyBook"
+        src={fallbackSrc}
+        className="w-full border-0 block"
+        style={{ minHeight: 720, background: "#e9eaec" }}
+        loading="lazy"
+        referrerPolicy="no-referrer-when-downgrade"
+      />
+    );
+  }
 
   return (
     <div
       id={CONTAINER_ID}
-      className="w-full min-h-[640px] rounded-sm overflow-hidden"
-      style={{ background: "#e9eaec" }}
+      ref={containerRef}
+      className="w-full rounded-sm"
+      style={{ minHeight: 720, background: "#e9eaec" }}
+      aria-busy={status === "loading"}
       aria-label="Calendario de reservas SimplyBook"
     />
   );
